@@ -1,0 +1,4 @@
+env_langchain
+env_llama
+.env
+doc/
