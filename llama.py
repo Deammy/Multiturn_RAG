@@ -1,21 +1,53 @@
-import together
-import json
-# from llama_index import SimpleRetriever
-# from llama_index import LLM
-from dotenv import load_dotenv
+from together import Together
+from PyPDF2 import PdfReader
+from llama_index.core.node_parser import SentenceSplitter
+from sentence_transformers import SentenceTransformer
+import pandas as pd
+
+
+# from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import (
+
+    Settings
+)
+# from llama_index.core.retrievers import QueryFusionRetriever
+# from llama_index.core.memory import ChatMemoryBuffer
+# from unicodedata import normalize
+
+# from llama_index.vector_stores.faiss import FaissVectorStore
+import faiss
+import numpy as np
+d = 1536  # dimension
+# faiss_index = faiss.IndexFlatL2(d)
+# vector_store = FaissVectorStore(faiss_index=faiss_index)
+# storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+# Settings.embed_model = HuggingFaceEmbedding(
+#     model_name="BAAI/bge-small-en-v1.5"
+# )
+
 import os
+import json
+from dotenv import load_dotenv
+
+
 load_dotenv()  
 
-from llama_index.core import SimpleDirectoryReader
+# uri = os.environ.get("MONGO_DB")
+# Create a new client and connect to the server
+# client = MongoClient(uri, server_api=ServerApi('1'))
 
-from llama_index.core import VectorStoreIndex
-from llama_index.core.retrievers import QueryFusionRetriever
+# def connect_mongo(uri):
+#     try:
+#         client = MongoClient(uri, server_api=ServerApi('1'))
+#         print("Connect Success")
+#         return client
+#     except:
+#         print("Connection Error")
+#         return None
 
-# class Retriever(SimpleRetriever):
-#     def __init__(self,retriever : R):
-#         self.retriever = retriever
-#         self.history = []
-
+# connect_mongo(uri)
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 """
     class : MultiturnRAG
@@ -39,37 +71,54 @@ from llama_index.core.retrievers import QueryFusionRetriever
         def get_response:
             get user input and prepare data, then get response from LLM.
 """
+
+
+
 class MultiturnRAG:
-    def __init__(self,model, document_path : list, context_length : int = 20):
+    def __init__(self,model, client, document_path: list, context_length : int = 20):
         self.document_path = document_path
         self.history = []
         self.context_length = context_length
         self.model = model
+        self.client = client
+        self.context = ""
+        
 
     def initial_retriever(self):
+
         """Initila Retriever
 
         input: -      
         output: -
     
         """
-        all_doc = []
-        for path in self.document_path:
-            print(path)
-            document = SimpleDirectoryReader(
-                input_files=[path]
-            ).load_data()
-            index = VectorStoreIndex.from_documents(document)
-            all_doc.append(index)
 
-        self.retriever  = QueryFusionRetriever(all_doc, 
-                                               similarity_top_k=2, 
-                                               num_queries=4,  # set this to 1 to disable query generation 
-                                               use_async=True, 
-                                               verbose=True,)
+        splitter = SentenceSplitter(chunk_size=500, chunk_overlap=100)
+        
+        text = ""
+        all_segment = []
+        for path in self.document_path:
+            reader = PdfReader(self.document_path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+            segment = splitter.split_text(text)
+            for seg in segment:
+                all_segment.append(seg)
+
+        df = pd.DataFrame(all_segment, columns = ["Text"])
+        print("Pass : 1")
+        df['Embedding'] = df['Text'].apply(model.encode)
+        vector = model.encode(df['Text'])
+        dim = vector.shape[1]
+        index = faiss.IndexFlatL2(dim)
+        index.add(vector)
+        self.retriever = index
+        self.df = df
 
 
     def prepare_context(self, query):
+
         """Prepare Context
 
         input:
@@ -79,10 +128,16 @@ class MultiturnRAG:
         context : context from document that relate to query.
     
         """
-        context = self.retriever.retrieve(query, top_k=self.context_length)
-        return context
+
+        encode_pre = model.encode(query)
+        svec = np.array(encode_pre).reshape(1,-1)
+        print("Pass : 3")
+        distance,pos = self.retriever.search(svec,k=2)
+
+        return self.df.Text.iloc[pos[0]]
     
-    def update_history(self, user_input, sys_response):
+    def update_history(self, user_input, bot_response):
+
         """Update History
 
         input:
@@ -90,9 +145,45 @@ class MultiturnRAG:
         sys_response : response from llm.
         
         """
-        self.history.append("User : " + user_input + "\n System : " + sys_response)
+        
 
-    def generate_response(self, input, context):
+        self.history.append({"role": "user", "content": user_input})
+        self.history.append({"role": "assistant", "content": bot_response})
+        if(len(self.history) == 6):
+            print("Rechat : ")
+            chat = "\n".join([str(history) for history in self.history])
+            qa_prompt_str = f"""
+                Context information is below.
+                ---------------------
+                {self.context}
+                ---------------------
+                Concluse this conversation
+                {chat}
+            """
+
+            
+            message = [{"role": "system", "content": "You are a helpful assistant. You must conclude this conversation.", "context" : self.context}]
+            for history in self.history:
+                message.append(history)
+            message.append({"role": "user", "content": qa_prompt_str})
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=message,
+                max_tokens=128,
+                temperature=0.7,
+                top_p=0.7,
+                top_k=50,
+                repetition_penalty=1,
+                stop=["[/INST]","</s>"],
+            )
+            print(dict(dict(dict(response)['choices'][0])['message'])['content'].split("im_end")[0].replace("im_start", "").replace("assistant","").replace("<","").replace(">","").replace("|",""))
+            self.context = dict(dict(dict(response)['choices'][0])['message'])['content'].split("im_end")[0].replace("im_start", "").replace("assistant","").replace("<","").replace(">","").replace("|","")
+            self.history = []
+
+        
+    def generate_response(self, input):
+
         """Generate response
         
         input :
@@ -102,24 +193,36 @@ class MultiturnRAG:
         output
         response : response from llm.
         """
-        # history_chat = "\n".join([history for history in self.history])
-        # response = self.model.complete(history_chat + "\n\n" " Context : "+ context + " User : " + input)
-        history_chat = "\n".join([history for history in self.history])
-        prompt = history_chat + "\n\n" " Context : "+ context + " User : " + input
-        print(prompt)
-        # response = together.Complete.create(
-        #     prompt = prompt, 
-        #     model = model, 
-        #     max_tokens = 32,
-        #     temperature = 0.7,
-        #     top_k = 5,
-        #     top_p = 0.7,
-        #     repetition_penalty = 1,
-        # )
-        # return response["choices"][0]["text"]
-        return "OKAY"
-    
+
+        input = input.replace("\b", "")
+
+        print(self.context)
+        if(self.context == ""):
+            message = [{"role": "system", "content": "You are a helpful assistant. You communicate in Thai language."}]
+        else:
+            message = [{"role": "system", "content": f"You are a helpful assistant. You communicate in Thai language. The context is {self.context}"}]
+
+        for history in self.history:
+            message.append(history)
+
+        message.append({"role": "user", "content": input})
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=message,
+            max_tokens=64,
+            temperature=0.7,
+            top_p=0.7,
+            top_k=50,
+            repetition_penalty=1,
+            stop=["[/INST]","</s>"],
+        )
+        print("Get response")
+
+        return dict(dict(dict(response)['choices'][0])['message'])['content'].split("im_end")[0].replace("im_start", "").replace("assistant","").replace("<","").replace(">","").replace("|","")
+            
     def get_response(self, user_input):
+
         """Get response
         input : 
         user_input : input from user.
@@ -128,29 +231,38 @@ class MultiturnRAG:
         response : responser from model.
 
         """
-        # context = self.prepare_context(query = user_input)
-        response = self.generate_response(input = user_input, context="Normal Conversation")
-        self.update_history(user_input = user_input,sys_response = response)
+        try:
+            response = self.generate_response(input = user_input)
+        except:
+            return "Error"
+        
+        self.update_history(user_input = user_input,bot_response = response)
+        
+        # response = self.retriever.chat(user_input)
         return response
 
 if __name__ == "__main__":
-    
     document = ["./doc/attention.pdf"]
-    # model = LLM(model_name='llama', api_key='your_openai_api_key')
-    model = "mistralai/Mixtral-8x7B-v0.1"
-
-    rag = MultiturnRAG(document_path=document, model=model)
+    model = "meta-llama/Meta-Llama-3-8B-Instruct-Lite"
+    #Use for get api with llm
+    client = Together(api_key=os.environ.get('TOGETHER_API_KEY'))
+    # Start RAG OOP
+    rag = MultiturnRAG(document_path=document, model=model, client=client)
     # rag.initial_retriever()
+    # print("Input : ")
+    # Input = str(input())
+    # print(rag.prepare_context(Input))
     Input = " "
     print("Start : \n")
     while(Input != "Exit"):
         Input = str(input())
-        response = rag.get_response(Input).split("Bot")[0]
-        print(f"Sys : {response}")
+        response = rag.get_response(Input)
+        print(response)
 
-# {'id': '8c1192f5bd3d45ac-BKK', 
-#  'object': <ObjectType.Completion: 'text.completion'>, 
-#  'created': 1725993916, 
-#  'model': 'mistralai/mixtral-8x7b-v0.1', 
-#  'choices': [
-#      {'index': 0, 'seed': 707816453355192800, 'finish_reason': <FinishReason.Length: 'length'>, 'text': '\n\n Bot : Hello\n\n Context : User asking for a joke\n\n Bot : Why did the chicken cross the road?\n\n Context : User asking for a joke\n\n Bot : Why did the chicken cross the road?\n\n Context : User asking for a joke\n\n Bot : Why did the chicken'}], 'prompt': [], 'usage': {'prompt_tokens': 12, 'completion_tokens': 64, 'total_tokens': 76}}
+
+
+
+
+
+
+
