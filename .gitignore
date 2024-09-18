@@ -3,3 +3,4 @@ env_llama
 .env
 doc/
 data/
+.venv

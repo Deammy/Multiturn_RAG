@@ -98,7 +98,7 @@ class MultiturnRAG:
         text = ""
         all_segment = []
         for path in self.document_path:
-            reader = PdfReader(self.document_path)
+            reader = PdfReader(path)
             text = ""
             for page in reader.pages:
                 text += page.extract_text()
@@ -157,7 +157,7 @@ class MultiturnRAG:
                 ---------------------
                 {self.context}
                 ---------------------
-                Concluse this conversation
+                Conclude this conversation
                 {chat}
             """
 
@@ -182,7 +182,7 @@ class MultiturnRAG:
             self.history = []
 
         
-    def generate_response(self, input):
+    def generate_response(self, input, query_context):
 
         """Generate response
         
@@ -198,14 +198,14 @@ class MultiturnRAG:
 
         print(self.context)
         if(self.context == ""):
-            message = [{"role": "system", "content": "You are a helpful assistant. You communicate in Thai language."}]
+            message = [{"role": "system", "content": "You are a helpful assistant."}] #You communicate in Thai language.
         else:
-            message = [{"role": "system", "content": f"You are a helpful assistant. You communicate in Thai language. The context is {self.context}"}]
+            message = [{"role": "system", "content": f"You are a helpful assistant. The context is {self.context}"}]
 
         for history in self.history:
             message.append(history)
 
-        message.append({"role": "user", "content": input})
+        message.append({"role": "user", "content": input, "context" : query_context})
 
         response = self.client.chat.completions.create(
             model=self.model,
@@ -248,16 +248,16 @@ if __name__ == "__main__":
     client = Together(api_key=os.environ.get('TOGETHER_API_KEY'))
     # Start RAG OOP
     rag = MultiturnRAG(document_path=document, model=model, client=client)
-    # rag.initial_retriever()
-    # print("Input : ")
-    # Input = str(input())
-    # print(rag.prepare_context(Input))
-    Input = " "
-    print("Start : \n")
-    while(Input != "Exit"):
-        Input = str(input())
-        response = rag.get_response(Input)
-        print(response)
+    rag.initial_retriever()
+    print("Input : ")
+    Input = str(input())
+    print(rag.prepare_context(Input))
+    # Input = " "
+    # print("Start : \n")
+    # while(Input != "Exit"):
+    #     Input = str(input())
+    #     response = rag.get_response(Input)
+    #     print(response)
 
 
 

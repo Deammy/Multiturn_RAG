@@ -11,8 +11,7 @@ for page in reader.pages:
     text += page.extract_text()
 print("Pass : 0")
 segment = splitter.split_text(text)
-print("???")
-print(segment)
+
 df = pd.DataFrame(segment, columns = ["Text"])
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
